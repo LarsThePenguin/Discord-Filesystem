@@ -1,21 +1,23 @@
-########################
-#  Discord Filesystem  #
-# By: Lars the Penguin #
-########################
+###############################
+# Discord Filesystem Win v1.5 #
+#     By: Lars the Penguin    #
+###############################
 
 # CONFIGURATION #
 
+
 # Bot token
-TOKEN = "DISCORD_BOT_TOKEN_HERE"
+TOKEN = "Discord_Bot_Token" # BOT TOKEN HERE
 
 # ID of the channel you want the messages to be sent to and read from
-CHANNEL_ID = 0 # Discord Channel ID here
+CHANNEL_ID = None # CHANNEL ID HERE
 
 maxCacheSize = 4 # This is in Gibibytes
-cacheDirectoryName = "Cache\\"
-maxFileSize = 20_000_000
+cacheDirectoryName = "Cache\\" # The directory that cached files are stored
+maxFileSize = 20_000_000 # The size of spilts for uploading to Discord
 
-saveFile = "files.pickle"
+saveFile = "files.pickle" # The file where the IDs of the files should be saved
+
 
 # END OF CONFIGURATION #
 
@@ -85,6 +87,7 @@ def macroForPickle(self):
 			if type(self) == DiscordFile:
 				stuff[str(self.path)] = self.get_file_info()
 				stuff[str(self.path)]["IDs"] = self.IDs
+				stuff[str(self.path)]["isCached"] = self.isCached
 				with open(saveFile, "wb") as fw:
 					pickle.dump(stuff, fw)
 			elif type(self) == DiscordFolderObj:
@@ -96,6 +99,7 @@ def macroForPickle(self):
 		if type(self) == DiscordFile:
 			stuff[str(self.path)] = self.get_file_info()
 			stuff[str(self.path)]["IDs"] = self.IDs
+			stuff[str(self.path)]["isCached"] = self.isCached
 			with open(saveFile, "wb") as fw:
 				pickle.dump(stuff, fw)
 		elif type(self) == DiscordFolderObj:
@@ -107,8 +111,6 @@ def pickleRead(path):
 	try:
 		with open(saveFile, "rb") as fr:
 			stuff = pickle.load(fr)
-			print(str(path))
-			print(stuff)
 			return stuff[str(path)]
 	except EOFError:
 		return None
@@ -238,7 +240,7 @@ class DiscordFile(DiscordBaseFileObj):
 			try:
 				data += bytearray(allocation_size - self.allocation_size)
 			except MemoryError:
-				print("Error: Not enough RAM to transfer file, this can be fixed (in code) by only downloading/uploading the modified parts of the file, that would require a overhaul of how file IDs are stored, storing the areas of the file that each ID stores.")
+				print("Error: Not enough RAM to transfer file.")
 			self.IDs = uploadFile(data)
 		macroForPickle(self)
 		self.file_size = min(self.file_size, allocation_size)
@@ -267,17 +269,22 @@ class DiscordFile(DiscordBaseFileObj):
 		end_offset = min(self.file_size, offset + length)
 		if cacheEnabled == True:
 			if not self.isCached:
-				data = readFile(self.IDs)[offset:end_offset]
+				data = readFile(self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)])[offset-int(offset/maxFileSize)*maxFileSize:end_offset-int(end_offset/maxFileSize)*maxFileSize]
 				data = bytes(data)
-				readInProgress = False
+				file = open(f"{cacheDirectoryName}{str(self.path).replace(backslash, '_')}", "wb")
+				file.seek(offset)
+				file.write(data)
+				readInProgress = True
 				return data
 			else:
-				data = open(f"{cacheDirectoryName}{str(self.path).replace(backslash, '_')}", "rb").read()[offset:end_offset]
+				file = open(f"{cacheDirectoryName}{str(self.path).replace(backslash, '_')}", "rb")
+				file.seek(offset)
+				data = file.read(length)
 				self.cacheLastAccess = time.time()
 				readInProgress = False
 				return data
 		else:
-			data = readFile(self.IDs)[offset:end_offset]
+			data = readFile(self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)])[offset-int(offset/maxFileSize)*maxFileSize:end_offset-int(end_offset/maxFileSize)*maxFileSize]
 			data = bytes(data)
 			readInProgress = False
 			return data
@@ -299,26 +306,27 @@ class DiscordFile(DiscordBaseFileObj):
 				file = open(f"{cacheDirectoryName}{str(self.path).replace(backslash, '_')}", "wb+")
 				file.seek(offset)
 				file.write(buffer)
-				data = file.read()
-				data[offset:end_offset] = buffer
-				self.IDs = uploadFile(data)
+				file.seek(int(offset/maxFileSize)*maxFileSize)
+				data = file.read(int(end_offset/maxFileSize)*maxFileSize-len(buffer))
+				data[offset-int(offset/maxFileSize)*maxFileSize:end_offset-int(end_offset/maxFileSize)*maxFileSize] = buffer
+				self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)] = uploadFile(data)
 				if sum(d.stat().st_size for d in os.scandir(cacheDirectoryName) if d.is_file()) > maxCacheSize*1_073_741_824:
 					deleteOldestFile = True
 			else:
-				data = readFile(self.IDs)
-				data[offset:end_offset] = buffer
+				data = readFile(self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)])
+				data[offset-int(offset/maxFileSize)*maxFileSize:end_offset-int(end_offset/maxFileSize)*maxFileSize] = buffer
 				file = open(f"{cacheDirectoryName}{str(self.path).replace(backslash, '_')}", "wb")
 				file.seek(offset)
 				file.write(buffer)
-				self.IDs = uploadFile(data)
+				self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)] = uploadFile(data)
 				if self.isCached == False:
 					self.isCached = True
 				if sum(d.stat().st_size for d in os.scandir(cacheDirectoryName) if d.is_file()) > maxCacheSize*1_073_741_824:
 					deleteOldestFile = True
 		else:
-			data = readFile(self.IDs)
-			data[offset:end_offset] = buffer
-			self.IDs = uploadFile(data)
+			data = readFile(self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)])
+			data[offset-int(offset/maxFileSize)*maxFileSize:end_offset-int(end_offset/maxFileSize)*maxFileSize] = buffer
+			self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)] = uploadFile(data)
 		macroForPickle(self)
 		writeInProgress = False
 		return len(buffer)
@@ -353,9 +361,9 @@ class DiscordFile(DiscordBaseFileObj):
 				if sum(d.stat().st_size for d in os.scandir(cacheDirectoryName) if d.is_file()) > maxCacheSize*1_073_741_824:
 					deleteOldestFile = True
 		else:
-			data = readFile(self.IDs)
-			data[offset:end_offset] = buffer[:transferred_length]
-			self.IDs = uploadFile(data)
+			data = readFile(self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)])
+			data[offset-int(offset/maxFileSize)*maxFileSize:end_offset-int(end_offset/maxFileSize)*maxFileSize] = buffer[:transferred_length]
+			self.IDs[int(offset/maxFileSize):int(end_offset/maxFileSize)] = uploadFile(data)
 		macroForPickle(self)
 		writeInProgress = False
 		return transferred_length
@@ -389,7 +397,6 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 		self._entries = {self._root_path: self._root_obj}
 		try:
 			stuff = pickle.load(open(saveFile, "rb"))
-			print(stuff.keys())
 			if stuff == None:
 				raise
 			for i in stuff.keys():
@@ -613,7 +620,7 @@ def runVirtualDisk():
 	debug = False
 	if debug:
 		enable_debug_log()
-	mountpoint = Path("X:")
+	mountpoint = Path("Z:")
 	is_drive = mountpoint.parent == mountpoint
 	reject_irp_prior_to_transact0 = not is_drive and not testing
 	global timeSpentReading, currentReadSpeed
