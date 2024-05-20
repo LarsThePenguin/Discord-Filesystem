@@ -10,7 +10,7 @@
 TOKEN = "DISCORD_BOT_TOKEN_HERE"
 
 # ID of the channel you want the messages to be sent to and read from
-CHANNEL_ID = 0 # CHANNEL ID HERE
+CHANNEL_ID = 1 # CHANNEL ID HERE
 
 maxCacheSize = 4 # This is in Gibibytes
 cacheDirectoryName = "Cache\\" # The directory that cached files are stored
