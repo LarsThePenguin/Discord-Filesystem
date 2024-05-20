@@ -7,10 +7,10 @@
 
 
 # Bot token
-TOKEN = "Discord_Bot_Token" # BOT TOKEN HERE
+TOKEN = "DISCORD_BOT_TOKEN_HERE"
 
 # ID of the channel you want the messages to be sent to and read from
-CHANNEL_ID = None # CHANNEL ID HERE
+CHANNEL_ID = 0 # CHANNEL ID HERE
 
 maxCacheSize = 4 # This is in Gibibytes
 cacheDirectoryName = "Cache\\" # The directory that cached files are stored
@@ -21,10 +21,12 @@ saveFile = "files.pickle" # The file where the IDs of the files should be saved
 
 # END OF CONFIGURATION #
 
-from winfspy import FileSystem, enable_debug_log
-import discord, pickle
-from winfspy.memfs import *
-import threading, time, os
+from winfspy import FileSystem, BaseFileSystemOperations, FILE_ATTRIBUTE, CREATE_FILE_CREATE_OPTIONS, NTStatusObjectNameNotFound, NTStatusDirectoryNotEmpty, NTStatusNotADirectory, NTStatusObjectNameCollision, NTStatusAccessDenied, NTStatusEndOfFile, NTStatusMediaWriteProtected, enable_debug_log
+from winfspy.plumbing.security_descriptor import SecurityDescriptor
+from winfspy.plumbing.win32_filetime import filetime_now
+import threading, time, os, discord, pickle, logging
+from pathlib import Path, PureWindowsPath
+from functools import wraps
 from textwrap import wrap
 
 client = discord.Client(intents=discord.Intents.default(), max_messages=20)
@@ -47,6 +49,29 @@ try:
 except:
 	with open(saveFile, "w") as f:
 		f.write("")
+
+def operation(fn):
+	"""Decorator for file system operations.
+
+	Provides both logging and thread-safety
+	"""
+	name = fn.__name__
+
+	@wraps(fn)
+	def wrapper(self, *args, **kwargs):
+		head = args[0] if args else None
+		tail = args[1:] if args else ()
+		try:
+			with self._thread_lock:
+				result = fn(self, *args, **kwargs)
+		except Exception as exc:
+			logging.info(f" NOK | {name:20} | {head!r:20} | {tail!r:20} | {exc!r}")
+			raise
+		else:
+			logging.info(f" OK! | {name:20} | {head!r:20} | {tail!r:20} | {result!r}")
+			return result
+
+	return wrapper
 
 def addToReadSpeed(numb):
 	global currentReadSpeed, printCurrentReadSpeed
@@ -85,25 +110,25 @@ def macroForPickle(self):
 		with open(saveFile, "rb") as fr:
 			stuff = pickle.load(fr)
 			if type(self) == DiscordFile:
-				stuff[str(self.path)] = self.get_file_info()
+				stuff[str(self.path)] = self.get_file_info_for_pickle()
 				stuff[str(self.path)]["IDs"] = self.IDs
 				stuff[str(self.path)]["isCached"] = self.isCached
 				with open(saveFile, "wb") as fw:
 					pickle.dump(stuff, fw)
 			elif type(self) == DiscordFolderObj:
-				stuff[str(self.path)] = self.get_file_info()
+				stuff[str(self.path)] = self.get_file_info_for_pickle()
 				with open(saveFile, "wb") as fw:
 					pickle.dump(stuff, fw)
 	except EOFError:
 		stuff = {}
 		if type(self) == DiscordFile:
-			stuff[str(self.path)] = self.get_file_info()
+			stuff[str(self.path)] = self.get_file_info_for_pickle()
 			stuff[str(self.path)]["IDs"] = self.IDs
 			stuff[str(self.path)]["isCached"] = self.isCached
 			with open(saveFile, "wb") as fw:
 				pickle.dump(stuff, fw)
 		elif type(self) == DiscordFolderObj:
-			stuff[str(self.path)] = self.get_file_info()
+			stuff[str(self.path)] = self.get_file_info_for_pickle()
 			with open(saveFile, "wb") as fw:
 				pickle.dump(stuff, fw)
 
@@ -144,7 +169,7 @@ def uploadFile(data: bytearray) -> list:
 		addToWriteSpeed(len(chunk)/(time.time() - start + 0.01))
 	return messageIDs
 
-class DiscordBaseFileObj(object):
+class DiscordBaseFileObj:
 	@property
 	def name(self):
 		"""File name, without the path"""
@@ -156,7 +181,6 @@ class DiscordBaseFileObj(object):
 		return str(self.path)
 
 	def __init__(self, path, attributes, security_descriptor):
-		path = Path(path)
 		self.path = path
 		self.attributes = attributes
 		self.security_descriptor = security_descriptor
@@ -168,7 +192,7 @@ class DiscordBaseFileObj(object):
 		self.index_number = 0
 		self.file_size = 0
 
-	def get_file_info(self):
+	def get_file_info_for_pickle(self):
 		return {
 			"path": self.path,
 			"attributes": self.attributes,
@@ -182,24 +206,42 @@ class DiscordBaseFileObj(object):
 			"security_descriptor": SecurityDescriptor.to_string(self.security_descriptor)
 		}
 
+	def get_file_info(self):
+		return {
+			"file_attributes": self.attributes,
+			"allocation_size": self.allocation_size,
+			"file_size": self.file_size,
+			"creation_time": self.creation_time,
+			"last_access_time": self.last_access_time,
+			"last_write_time": self.last_write_time,
+			"change_time": self.change_time,
+			"index_number": self.index_number,
+		}
+
 	def __repr__(self):
 		return f"{type(self).__name__}:{self.file_name}"
 
+class OpenedObj:
+	def __init__(self, file_obj):
+		self.file_obj = file_obj
+
+	def __repr__(self):
+		return f"{type(self).__name__}:{self.file_obj.file_name}"
+
 class DiscordFolderObj(DiscordBaseFileObj):
-	def __init__(self, path, attributes, security_descriptor):
-		path = Path(path)
+	def __init__(self, path, attributes=None, security_descriptor=None):
 		hehe = pickleRead(path)
 		if hehe == None:
 			super().__init__(path, attributes, security_descriptor)
 			self.allocation_size = 0
-			assert self.attributes & FILE_ATTRIBUTE.FILE_ATTRIBUTE_DIRECTORY
+			macroForPickle(self)
 		else:
-			super().__init__(path, attributes, security_descriptor)
 			for i in hehe.keys():
 				if i == "security_descriptor":
 					self.security_descriptor = SecurityDescriptor.from_string(hehe[i])
 				else:
 					setattr(self, i, hehe[i])
+		assert self.attributes & FILE_ATTRIBUTE.FILE_ATTRIBUTE_DIRECTORY
 
 class DiscordFile(DiscordBaseFileObj):
 
@@ -373,9 +415,9 @@ class DiscordFile(DiscordBaseFileObj):
 		data = readFile(self.IDs) # Note (Fix later), should read from cache (disk), not from Discord
 		self.IDs = uploadFile(data)
 	
-class DiscordVirtualDisk(InMemoryFileSystemOperations):
+class DiscordVirtualDisk(BaseFileSystemOperations):
 	def __init__(self, sizeInGB = 16, read_only=False):
-		super().__init__("")
+		super().__init__()
 
 		max_file_nodes = 1024
 		max_file_size = sizeInGB * 1024 * 1024
@@ -389,7 +431,7 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 
 		self.read_only = read_only
 		self._root_path = PureWindowsPath("/")
-		self._root_obj = FolderObj(
+		self._root_obj = DiscordFolderObj(
 			self._root_path,
 			FILE_ATTRIBUTE.FILE_ATTRIBUTE_DIRECTORY,
 			SecurityDescriptor.from_string("O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;WD)"),
@@ -401,10 +443,10 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 				raise
 			for i in stuff.keys():
 				if "IDs" in list(stuff[i].keys()):
-					self._entries[Path(stuff[i]["path"])] = DiscordFile(PureWindowsPath(stuff[i]["path"]))
-				elif "IDs" not in list(stuff[i].keys()):
-					self._entries[Path(stuff[i]["path"])] = DiscordFolderObj(PureWindowsPath(stuff[i]["path"]))
-		except:
+					self._entries[Path(stuff[i]["path"])] = DiscordFile(Path(stuff[i]["path"]))
+				else:
+					self._entries[Path(stuff[i]["path"])] = DiscordFolderObj(Path(stuff[i]["path"]))
+		except Exception as e:
 			macroForPickle(self._root_obj)
 		self._thread_lock = threading.Lock()
 		if cacheEnabled:
@@ -424,6 +466,15 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 						break
 				os.remove(oldest_file)
 
+	def _create_directory(self, path):
+		path = self._root_path / path
+		obj = DiscordFolderObj(
+			path,
+			FILE_ATTRIBUTE.FILE_ATTRIBUTE_DIRECTORY,
+			self._root_obj.security_descriptor,
+		)
+		self._entries[path] = obj
+
 	def _import_files(self, file_path):
 		file_path = Path(file_path)
 		path = self._root_path / file_path.name
@@ -434,6 +485,30 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 		)
 		self._entries[path] = obj
 		obj.write(file_path.read_bytes(), 0, False)
+
+	@operation
+	def get_volume_info(self):
+		return self._volume_info
+
+	@operation
+	def set_volume_label(self, volume_label):
+		self._volume_info["volume_label"] = volume_label
+
+	@operation
+	def get_security_by_name(self, file_name):
+		file_name = PureWindowsPath(file_name)
+
+		# Retrieve file
+		try:
+			file_obj = self._entries[file_name]
+		except KeyError:
+			raise NTStatusObjectNameNotFound()
+
+		return (
+			file_obj.attributes,
+			file_obj.security_descriptor.handle,
+			file_obj.security_descriptor.size,
+		)
 
 	@operation
 	def rename(self, file_context, file_name, new_file_name, replace_if_exists):
@@ -464,10 +539,28 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 				relative = entry_path.relative_to(file_name)
 				new_entry_path = new_file_name / relative
 				entry = self._entries.pop(entry_path)
+				stuff = pickle.load(open(saveFile, "rb"))
+				del stuff[str(entry.path)]
+				pickle.dump(stuff, open(saveFile, "wb"))
 				entry.path = new_entry_path
 				self._entries[new_entry_path] = entry
+				macroForPickle(entry)
 			except ValueError:
 				continue
+
+	@operation
+	def get_security(self, file_context):
+		return file_context.file_obj.security_descriptor
+
+	@operation
+	def set_security(self, file_context, security_information, modification_descriptor):
+		if self.read_only:
+			raise NTStatusMediaWriteProtected()
+
+		new_descriptor = file_context.file_obj.security_descriptor.evolve(
+			security_information, modification_descriptor
+		)
+		file_context.file_obj.security_descriptor = new_descriptor
 
 	@operation
 	def create(
@@ -554,6 +647,109 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 				return entries[i + 1 :]
 
 	@operation
+	def open(self, file_name, create_options, granted_access):
+		file_name = PureWindowsPath(file_name)
+
+		# `granted_access` is already handle by winfsp
+
+		# Retrieve file
+		try:
+			file_obj = self._entries[file_name]
+		except KeyError:
+			raise NTStatusObjectNameNotFound()
+
+		return OpenedObj(file_obj)
+
+	@operation
+	def close(self, file_context):
+		pass
+
+	@operation
+	def get_file_info(self, file_context):
+		return file_context.file_obj.get_file_info()
+
+
+	@operation
+	def set_basic_info(
+		self,
+		file_context,
+		file_attributes,
+		creation_time,
+		last_access_time,
+		last_write_time,
+		change_time,
+		file_info,
+	) -> dict:
+		if self.read_only:
+			raise NTStatusMediaWriteProtected()
+
+		file_obj = file_context.file_obj
+		if file_attributes != FILE_ATTRIBUTE.INVALID_FILE_ATTRIBUTES:
+			file_obj.attributes = file_attributes
+		if creation_time:
+			file_obj.creation_time = creation_time
+		if last_access_time:
+			file_obj.last_access_time = last_access_time
+		if last_write_time:
+			file_obj.last_write_time = last_write_time
+		if change_time:
+			file_obj.change_time = change_time
+
+		return file_obj.get_file_info()
+
+	@operation
+	def set_file_size(self, file_context, new_size, set_allocation_size):
+		if self.read_only:
+			raise NTStatusMediaWriteProtected()
+
+		if set_allocation_size:
+			file_context.file_obj.set_allocation_size(new_size)
+		else:
+			file_context.file_obj.set_file_size(new_size)
+
+	@operation
+	def can_delete(self, file_context, file_name: str) -> None:
+		file_name = PureWindowsPath(file_name)
+
+		# Retrieve file
+		try:
+			file_obj = self._entries[file_name]
+		except KeyError:
+			raise NTStatusObjectNameNotFound
+
+		if isinstance(file_obj, DiscordFolderObj):
+			for entry in self._entries.keys():
+				try:
+					if entry.relative_to(file_name).parts:
+						raise NTStatusDirectoryNotEmpty()
+				except ValueError:
+					continue
+
+	@operation
+	def get_dir_info_by_name(self, file_context, file_name):
+		path = file_context.file_obj.path / file_name
+		try:
+			entry_obj = self._entries[path]
+		except KeyError:
+			raise NTStatusObjectNameNotFound()
+
+		return {"file_name": file_name, **entry_obj.get_file_info()}
+
+	@operation
+	def read(self, file_context, offset, length):
+		return file_context.file_obj.read(offset, length)
+
+	@operation
+	def write(self, file_context, buffer, offset, write_to_end_of_file, constrained_io):
+		if self.read_only:
+			raise NTStatusMediaWriteProtected()
+
+		if constrained_io:
+			return file_context.file_obj.constrained_write(buffer, offset)
+		else:
+			return file_context.file_obj.write(buffer, offset, write_to_end_of_file)
+
+	@operation
 	def cleanup(self, file_context, file_name, flags) -> None:
 		if self.read_only:
 			raise NTStatusMediaWriteProtected()
@@ -577,6 +773,9 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 			# Delete immediately
 			try:
 				del self._entries[file_obj.path]
+				stuff = pickle.load(open(saveFile, "rb"))
+				del stuff[str(file_obj.path)]
+				pickle.dump(stuff, open(saveFile, "wb"))
 			except KeyError:
 				raise NTStatusObjectNameNotFound()
 
@@ -599,6 +798,35 @@ class DiscordVirtualDisk(InMemoryFileSystemOperations):
 		# Set last access time
 		if flags & FspCleanupSetChangeTime:
 			file_obj.change_time = filetime_now()
+
+	@operation
+	def overwrite(
+		self, file_context, file_attributes, replace_file_attributes: bool, allocation_size: int
+	) -> None:
+		if self.read_only:
+			raise NTStatusMediaWriteProtected()
+
+		file_obj = file_context.file_obj
+
+		# File attributes
+		file_attributes |= FILE_ATTRIBUTE.FILE_ATTRIBUTE_ARCHIVE
+		if replace_file_attributes:
+			file_obj.attributes = file_attributes
+		else:
+			file_obj.attributes |= file_attributes
+
+		# Allocation size
+		file_obj.set_allocation_size(allocation_size)
+
+		# Set times
+		now = filetime_now()
+		file_obj.last_access_time = now
+		file_obj.last_write_time = now
+		file_obj.change_time = now
+
+	@operation
+	def flush(self, file_context) -> None:
+		pass
 
 def handleYesNo(prompt):
 	while True:
